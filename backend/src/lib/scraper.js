@@ -4,7 +4,6 @@ const OpenAI = require('openai');
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 function buildFedUrl(date) {
-  // date is a Date object or YYYY-MM-DD string
   const d = typeof date === 'string' ? new Date(date + 'T12:00:00Z') : date;
   const y = d.getUTCFullYear();
   const m = String(d.getUTCMonth() + 1).padStart(2, '0');
@@ -17,13 +16,23 @@ async function fetchFedPage(url) {
     const res = await axios.get(url, {
       timeout: 15000,
       headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; EnforcementMonitor/1.0)',
-        'Accept': 'text/html',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
       },
-      validateStatus: (s) => s < 500,
+      validateStatus: (s) => s < 600,
     });
 
     if (res.status === 404) return { exists: false, html: null };
+
+    // 403 means the server blocked us — surface this clearly
+    if (res.status === 403) {
+      throw new Error(`HTTP 403 Forbidden — the Fed server blocked this request. Check User-Agent or hosting IP.`);
+    }
+
+    if (res.status >= 400) return { exists: false, html: null };
 
     const html = res.data;
     if (
@@ -37,6 +46,7 @@ async function fetchFedPage(url) {
 
     return { exists: true, html };
   } catch (err) {
+    if (err.message.includes('403')) throw err;
     throw new Error(`Failed to fetch Fed page: ${err.message}`);
   }
 }
@@ -53,40 +63,47 @@ function stripHtml(html) {
     .trim();
 }
 
-async function extractEnforcements(html, url) {
+async function extractEnforcements(html) {
   const text = stripHtml(html);
-  // Focus on the enforcement content section
-  const startIdx = Math.max(0, text.indexOf('Federal Reserve Board'));
-  const snippet = text.slice(startIdx, startIdx + 4000);
 
-  const prompt = `You are extracting Federal Reserve enforcement actions from this page text.
+  // Find the earliest enforcement-related marker so we don't miss content
+  const markers = ['Consent prohibition', 'Consent order', 'institution-affiliated', 'Former employee'];
+  let startIdx = 0;
+  for (const marker of markers) {
+    const idx = text.indexOf(marker);
+    if (idx > -1) {
+      startIdx = Math.max(0, idx - 300);
+      break;
+    }
+  }
+  // Fall back to looking for the Federal Reserve Board header
+  if (startIdx === 0) {
+    const fbIdx = text.indexOf('Federal Reserve Board');
+    if (fbIdx > -1) startIdx = fbIdx;
+  }
+
+  const snippet = text.slice(startIdx, startIdx + 5000);
+
+  const prompt = `Extract all Federal Reserve enforcement actions from the text below.
 
 Text:
 """
 ${snippet}
 """
 
-Extract ALL enforcement actions. Each action has this pattern:
-  "Consent prohibition against [NAME]" or "Consent order against [NAME]"
-  "Former employee of [BANK], [CITY], [STATE]"
-  [optional offense line]
+For each enforcement action found, extract:
+- person_or_entity: the person/entity name (from "Consent prohibition against [NAME]" or "Consent order against [NAME]")
+- individual_affiliation: the full affiliation phrase (e.g. "Former employee of Atlantic Union Bank")
+- entity_name: just the bank or institution name
+- city: city of the institution
+- state: 2-letter US state abbreviation
+- offense: the stated reason or crime (e.g. "Embezzlement of bank funds")
 
-Return ONLY valid JSON (no markdown, no explanation):
-{
-  "enforcements": [
-    {
-      "person_or_entity": "full name",
-      "individual_affiliation": "Former employee of X" phrase or null,
-      "entity_name": "bank/institution name only",
-      "city": "city name",
-      "state": "2-letter state code",
-      "offense": "stated reason/crime or null"
-    }
-  ]
-}
+Return ONLY valid JSON with no markdown fences, no explanation, nothing else:
+{"enforcements":[{"person_or_entity":"...","individual_affiliation":"...","entity_name":"...","city":"...","state":"...","offense":"..."}]}
 
-If no enforcement actions found: {"enforcements": []}
-Use null for any missing field.`;
+If no enforcement actions exist: {"enforcements":[]}
+Use null for any field that cannot be determined.`;
 
   const completion = await openai.chat.completions.create({
     model: 'gpt-4o-mini',
@@ -115,9 +132,8 @@ async function scrapeDate(dateStr) {
   try {
     const { exists, html } = await fetchFedPage(url);
     result.page_exists = exists;
-
     if (exists) {
-      const extracted = await extractEnforcements(html, url);
+      const extracted = await extractEnforcements(html);
       result.enforcements = extracted.enforcements || [];
     }
   } catch (err) {

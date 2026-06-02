@@ -1,9 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const supabase = require('../lib/supabase');
-const { scrapeDate, getDatesInRange, buildFedUrl } = require('../lib/scraper');
+const { scrapeDate, getDatesInRange } = require('../lib/scraper');
 
-// Middleware: verify cron secret for automated triggers
 function verifyCronSecret(req, res, next) {
   const secret = req.headers['x-cron-secret'];
   if (secret !== process.env.CRON_SECRET) {
@@ -12,9 +11,7 @@ function verifyCronSecret(req, res, next) {
   next();
 }
 
-// Save a scrape result to Supabase
 async function saveResult(result) {
-  // Upsert the daily check record
   const { data: check, error: checkErr } = await supabase
     .from('enforcement_checks')
     .upsert(
@@ -33,12 +30,8 @@ async function saveResult(result) {
 
   if (checkErr) throw new Error(`Check upsert failed: ${checkErr.message}`);
 
-  // Delete old enforcements for this date then reinsert
   if (result.page_exists && result.enforcements.length > 0) {
-    await supabase
-      .from('enforcements')
-      .delete()
-      .eq('check_id', check.id);
+    await supabase.from('enforcements').delete().eq('check_id', check.id);
 
     const rows = result.enforcements.map((e) => ({
       check_id: check.id,
@@ -59,7 +52,7 @@ async function saveResult(result) {
   return check;
 }
 
-// POST /api/scrape/today  — called by cron-job.org daily
+// POST /api/scrape/today — called by cron-job.org
 router.post('/today', verifyCronSecret, async (req, res) => {
   const today = new Date().toISOString().split('T')[0];
   try {
@@ -77,7 +70,7 @@ router.post('/today', verifyCronSecret, async (req, res) => {
   }
 });
 
-// POST /api/scrape/range  — manual backfill: { from: "YYYY-MM-DD", to: "YYYY-MM-DD" }
+// POST /api/scrape/range — SSE streaming progress: { from, to }
 router.post('/range', async (req, res) => {
   const { from, to } = req.body;
   if (!from || !to) return res.status(400).json({ error: 'from and to dates required' });
@@ -85,12 +78,18 @@ router.post('/range', async (req, res) => {
   const dates = getDatesInRange(from, to);
   if (dates.length > 60) return res.status(400).json({ error: 'Max 60 days per request' });
 
-  // Stream progress via SSE so the frontend can show a live log
+  // SSE headers — flushHeaders() is critical so the browser receives events immediately
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no'); // disable nginx buffering on Render
+  res.flushHeaders();
 
-  const send = (data) => res.write(`data: ${JSON.stringify(data)}\n\n`);
+  const send = (data) => {
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+    // Force flush if available (some Node versions)
+    if (typeof res.flush === 'function') res.flush();
+  };
 
   send({ type: 'start', total: dates.length });
 
@@ -115,15 +114,15 @@ router.post('/range', async (req, res) => {
       failed++;
       send({ type: 'progress', index: i + 1, total: dates.length, date, error: err.message });
     }
-    // Small delay to be polite to the Fed's server
-    await new Promise((r) => setTimeout(r, 500));
+    // Polite delay between Fed requests
+    await new Promise((r) => setTimeout(r, 600));
   }
 
   send({ type: 'done', succeeded, failed });
   res.end();
 });
 
-// POST /api/scrape/single — scrape one specific date: { date: "YYYY-MM-DD" }
+// POST /api/scrape/single — scrape one date: { date: "YYYY-MM-DD" }
 router.post('/single', async (req, res) => {
   const { date } = req.body;
   if (!date) return res.status(400).json({ error: 'date required (YYYY-MM-DD)' });
