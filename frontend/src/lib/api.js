@@ -26,41 +26,43 @@ export const api = {
 
   getStats: () => request('/enforcements/stats'),
 
-  scrapeRange: (from, to, onProgress) => {
-    return new Promise((resolve, reject) => {
-      const url = `${BASE}/scrape/range`;
-      fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ from, to }),
-      })
-        .then((res) => {
-          const reader = res.body.getReader();
-          const decoder = new TextDecoder();
-          let buffer = '';
+  scrapeRange: async (from, to, onProgress) => {
+    const dates = getDatesInRange(from, to);
+    onProgress({ type: 'start', total: dates.length });
 
-          function pump() {
-            return reader.read().then(({ done, value }) => {
-              if (done) { resolve(); return; }
-              buffer += decoder.decode(value, { stream: true });
-              const lines = buffer.split('\n');
-              buffer = lines.pop();
-              for (const line of lines) {
-                if (line.startsWith('data: ')) {
-                  try {
-                    const data = JSON.parse(line.slice(6));
-                    onProgress?.(data);
-                    if (data.type === 'done') resolve(data);
-                  } catch {}
-                }
-              }
-              return pump();
-            });
-          }
-          return pump();
-        })
-        .catch(reject);
-    });
+    let succeeded = 0, failed = 0;
+
+    for (let i = 0; i < dates.length; i++) {
+      const date = dates[i];
+      try {
+        const result = await request('/scrape/single', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ date }),
+        });
+        succeeded++;
+        onProgress({
+          type: 'progress',
+          index: i + 1,
+          total: dates.length,
+          date,
+          page_exists: result.page_exists,
+          enforcement_count: result.enforcements?.length || 0,
+          error: result.error,
+        });
+      } catch (err) {
+        failed++;
+        onProgress({
+          type: 'progress',
+          index: i + 1,
+          total: dates.length,
+          date,
+          error: err.message,
+        });
+      }
+    }
+
+    onProgress({ type: 'done', succeeded, failed });
   },
 
   scrapeToday: () =>
@@ -70,3 +72,14 @@ export const api = {
       body: JSON.stringify({ date: new Date().toISOString().split('T')[0] }),
     }),
 };
+
+function getDatesInRange(from, to) {
+  const dates = [];
+  const cur = new Date(from + 'T12:00:00Z');
+  const end = new Date(to + 'T12:00:00Z');
+  while (cur <= end) {
+    dates.push(cur.toISOString().split('T')[0]);
+    cur.setUTCDate(cur.getUTCDate() + 1);
+  }
+  return dates;
+}
