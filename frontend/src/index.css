@@ -1,0 +1,42 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-gray-50 text-gray-900 antialiased;
+  }
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium border border-gray-200 bg-white hover:bg-gray-50 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed;
+  }
+  .btn-primary {
+    @apply bg-gray-900 text-white border-gray-900 hover:bg-gray-800;
+  }
+  .badge {
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium;
+  }
+  .badge-found {
+    @apply bg-green-50 text-green-800;
+  }
+  .badge-none {
+    @apply bg-gray-100 text-gray-600;
+  }
+  .badge-error {
+    @apply bg-red-50 text-red-700;
+  }
+  .badge-nopage {
+    @apply bg-gray-100 text-gray-500;
+  }
+  .card {
+    @apply bg-white rounded-xl border border-gray-200 shadow-sm;
+  }
+  .metric-card {
+    @apply bg-gray-50 rounded-lg p-4;
+  }
+  .input {
+    @apply h-9 px-3 rounded-md border border-gray-200 bg-white text-sm focus:outline-none focus:border-gray-400 transition-colors;
+  }
+}
